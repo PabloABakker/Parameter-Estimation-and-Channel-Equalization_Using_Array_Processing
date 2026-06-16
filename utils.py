@@ -1,12 +1,11 @@
 """
 Script containing utility functions 
 
-made by: Pablo Bakker and Jochem
+made by: Pablo Bakker and Jochem Groenenberg
 """
 
 # Libraries
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 # Steering Vector => a(theta): M x 1
@@ -17,7 +16,7 @@ def a(theta, M, delta):
   Returns the steering vector a(theta) of shape (M, 1).
   """
   # Get parameters
-  theta0 = theta * np.pi/180 # convert to radians
+  theta0 = theta * np.pi/180  # convert to radians
   delay = delta * np.sin(theta0)
   microphones = np.arange(M)
 
@@ -25,6 +24,7 @@ def a(theta, M, delta):
   a = np.exp(1j * 2*np.pi * microphones[:,np.newaxis] * delay)
 
   return a
+
 
 # Data Generation
 def gendata(M, N, delta, theta, f, SNR):
@@ -65,7 +65,7 @@ def esprit(X, d):
 
     # Shift-invariance split 
     Ux = Uz[:-1, :]  # rows 1 ... M-1
-    Uy = Uz[1:, :] # rows 2 ... M
+    Uy = Uz[1:, :]  # rows 2 ... M
 
     # Ux^+ Uy = T^{-1} Theta T  
     Uxy = np.linalg.pinv(Ux) @ Uy
@@ -187,7 +187,6 @@ def joint(X, d, m):
     """
     Joint estimation of directions and frequencies via temporal smoothing and joint diagonalization. 
     with X an M x N data matrix, d the number of sources and m the temporal smoothing factor.
-
     Returns:
     theta : (d,) directions in degrees
     f : (d,) normalized frequencies in [0, 1)
@@ -217,7 +216,7 @@ def joint(X, d, m):
     # Selecting within samples to shift in time
     Ux_t = Uz[0:(m-1)*M, :]
     Uy_t = Uz[M:m*M, :]
-    Uxy_t = np.linalg.pinv(Ux_t) @ Uy_t  #  T^{-1} Psi T
+    Uxy_t = np.linalg.pinv(Ux_t) @ Uy_t  # T^{-1} Psi T
 
     # Joint diagonalization of the two matrices 
     Mstack = np.hstack([Uxy_s, Uxy_t])
@@ -259,11 +258,6 @@ def match_joint(th, fr, th_true, fr_true):
     return th[perm], fr[perm]
 
 
-# Statistics over runs
-def stats(arr):  # arr: (nSNR, nruns, d)
-    return arr.mean(axis=1), arr.std(axis=1)   # each (nSNR, d)
-
-
 # Function to match rows of an estimated source matrix S_est to the true source matrix
 def match_rows(S_true, S_est):
     """Permute + phase/scale-align S_est rows to S_true (resolve ambiguities)."""
@@ -276,13 +270,88 @@ def match_rows(S_true, S_est):
         S_aligned[i] = S_aligned[i] * scale
     return S_aligned
 
+
 # Compute which angle a weight vector w_row responds most strongly to from a list of angles
 def target_index(w_row, angles, M, delta):
     """Return index of the angle this weight vector responds most strongly to."""
-    resp = [abs(w_row.conj() @ a(ang, M, delta).flatten()) for ang in angles]
+    resp = [abs(w_row @ a(ang, M, delta).flatten()) for ang in angles]
     return int(np.argmax(resp))
 
 
 # Compute spatial response of a weight vector w_row to a range of angles
 def spatial_response(w_row, M, delta, angles):
-    return np.array([abs(w_row.conj() @ a(ang, M, delta).flatten()) for ang in angles])
+    return np.array([abs(w_row @ a(ang, M, delta).flatten()) for ang in angles])
+
+
+# Generate data for the channel equalization
+def gendata_conv(h, s, P, N, sigma):
+    """
+    Construct the oversampled received signal x
+    h : channel impulse response
+    s : length-N vector of QPSK symbols
+    P : oversampling factor (samples per symbol)
+    N : number of symbols
+    sigma : noise standard deviation
+    Returns x : (N*P) oversampled received signal vector
+    """
+    # Upsample symbols sych that symbol k sits at sample index k*P,
+    s_up = np.zeros(N * P, dtype=complex)
+    s_up[::P] = s                             
+
+    # Convolve
+    x = np.convolve(s_up, h)[:N*P] 
+
+    # Add complex Gaussian noise of std sigma 
+    noise = (sigma / np.sqrt(2)) * (np.random.randn(N * P) + 1j * np.random.randn(N * P))
+
+    return x + noise
+
+
+# QPSK alphabet
+def random_qpsk(N):
+    syms = (np.array([1, 1, -1, -1]) + 1j*np.array([1, -1, 1, -1])) / np.sqrt(2)
+    return syms[np.random.randint(0, 4, N)]
+
+
+# Function to create the stacked convolution matrix
+def build_H(h, P):
+    """
+    Block-Hankel channel matrix mapping the contributing symbols to the
+    stacked 2P-sample window. Columns = symbols that overlap the window.
+    """
+    rows = 2 * P
+
+    # Two symbols feed a 2-period window: symbol at offset 0 and offset P.
+    ncols = 2
+    H = np.zeros((rows, ncols), dtype=complex)
+    H[0:P, 0]   = h  # symbol n: occupies first period
+    H[P:2*P, 1] = h  # symbol n+1: occupies second period
+
+    return H
+
+
+# ZF equalizer
+def zf_equalizer(H, d):
+    """Zero-forcing equalizer recovering symbol index d"""
+    H_pinv = np.linalg.pinv(H)          
+    w_H = H_pinv[d, :]                  
+    return w_H                  
+
+
+# Wiener equalizer
+def wiener_equalizer(H, d, sigma):
+    """Wiener equalizer recovering symbol index d"""
+    rows = H.shape[0]
+
+    # Get data covariance
+    Rx = H @ H.conj().T + sigma**2 * np.eye(rows)   
+
+    # Get cross-correlation with target symbol
+    e_d = np.zeros((H.shape[1], 1))
+    e_d[d] = 1.0
+    r_xs = H @ e_d             
+
+    # Wiener filter weights            
+    w = np.linalg.solve(Rx, r_xs) 
+    
+    return w.flatten()
